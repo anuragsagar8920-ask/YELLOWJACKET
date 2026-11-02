@@ -3,50 +3,66 @@
 import pandas as pd
 import requests
 
-# 1. API Endpoint & Parameters Configuration
-url = "https://power.larc.nasa.gov/api/temporal/daily/point"
+locations = {
+    "Delhi": {"lat": 28.6139, "lon": 77.2090},
+    "Kerala": {"lat": 10.8505, "lon": 76.2711},
+}
 
-params = {
-    "parameters": "TS",  # Earth Skin Temperature (Land Surface Temperature)
-    "community": "AG",  # Agroclimatology
-    "longitude": 78.9629,  # India Center Coordinates
-    "latitude": 20.5937,
-    "start": "20140101",  # 10 Years Range (2014-2024)
-    "end": "20240101",
+url = "https://power.larc.nasa.gov/api/temporal/monthly/point"
+params_base = {
+    "parameters": "TS,PRECTOTCORR,GWETTOP",
+    "community": "AG",
+    "start": "2004",
+    "end": "2024",
     "format": "CSV",
 }
 
-print("Fetching data from NASA POWER API...")
-response = requests.get(url, params=params)
+combined_dfs = []
 
-file_path = "nasa_lst_sample_raw.csv"
+for loc_name, coords in locations.items():
+    print(f"\nFetching & Processing 20-Year Data for {loc_name}...")
+    params = params_base.copy()
+    params["latitude"] = coords["lat"]
+    params["longitude"] = coords["lon"]
 
-if response.status_code == 200:
-    with open(file_path, "w") as f:
-        f.write(response.text)
-    print(f"Data successfully fetched and saved to {file_path}")
-else:
-    print(f"Failed to fetch data. Status Code: {response.status_code}")
-    exit()
+    response = requests.get(url, params=params)
+    file_path = f"nasa_monthly_{loc_name.lower()}_raw.csv"
 
-# 2. Dynamic Header Line Detection (Fixes ParserError)
-header_line = 0
-with open(file_path, "r") as f:
-    for i, line in enumerate(f):
-        if line.startswith("YEAR") or "YEAR,DOY" in line:
-            header_line = i
-            break
+    if response.status_code == 200:
+        with open(file_path, "w") as f:
+            f.write(response.text)
 
-# 3. Read Clean Data Frame
-df = pd.read_csv(file_path, skiprows=header_line, na_values=[-999, -999.0])
+        header_line = 0
+        with open(file_path, "r") as f:
+            for i, line in enumerate(f):
+                if line.startswith("PARAMETER") or "PARAMETER,YEAR" in line:
+                    header_line = i
+                    break
 
-print("\n--- Data Integrity & Structure Check ---")
-print("Data Shape (Rows, Columns):", df.shape)
-print("\n--- Columns Info ---")
-print(df.info())
+        df = pd.read_csv(file_path, skiprows=header_line, na_values=[-999, -999.0])
+        
+        # Melt wide format (JAN-DEC) to long time-series format
+        month_cols = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC']
+        df_long = df.melt(id_vars=['PARAMETER', 'YEAR'], value_vars=month_cols, var_name='MONTH', value_name='VALUE')
+        
+        # Pivot parameters into separate columns
+        df_pivoted = df_long.pivot(index=['YEAR', 'MONTH'], columns='PARAMETER', values='VALUE').reset_index()
+        
+        # Create proper Datetime column
+        df_pivoted['DATE'] = pd.to_datetime(df_pivoted['YEAR'].astype(str) + '-' + df_pivoted['MONTH'], format='%Y-%b')
+        df_pivoted = df_pivoted.sort_values('DATE').reset_index(drop=True)
+        df_pivoted['LOCATION'] = loc_name
+        
+        # Reorder columns
+        df_clean = df_pivoted[['LOCATION', 'DATE', 'YEAR', 'MONTH', 'TS', 'PRECTOTCORR', 'GWETTOP']]
+        df_clean.to_csv(f"nasa_monthly_{loc_name.lower()}_processed.csv", index=False)
+        combined_dfs.append(df_clean)
 
-print("\n--- First 5 Rows ---")
-print(df.head())
+        print(f"Cleaned Time-Series Data saved for {loc_name}: {df_clean.shape[0]} monthly entries.")
+        print(df_clean.head(3))
 
-print("\n--- Missing Values Check ---")
-print(df.isnull().sum())
+# Combine all locations
+final_df = pd.concat(combined_dfs, ignore_index=True)
+final_df.to_csv("nasa_multi_region_processed.csv", index=False)
+print("\n--- Final Merged Dataset Info ---")
+print("Total Rows:", final_df.shape[0])
